@@ -1,5 +1,6 @@
 ﻿using System.Data;
 using System.Text;
+using System.Transactions;
 using mocking;
 using MySqlConnector;
 
@@ -182,38 +183,56 @@ public static class DatabaseHandling
         await transaction.CommitAsync();
     }
 
-    public static async Task InsertPersonAsyncBulkCopy(IEnumerable<Person> persons, MySqlConnection connection)
+    public static async Task InsertPersonAsyncBulkCopy(IEnumerable<Person> persons, MySqlConnection connection, int batchSize = 10000)
     {
-        // Create a DataTable to hold the data
-        var dataTable = new DataTable();
-        dataTable.Columns.Add("Id");
-        dataTable.Columns.Add("FirstName");
-        dataTable.Columns.Add("LastName");
-        dataTable.Columns.Add("Street");
-        dataTable.Columns.Add("City");
-        dataTable.Columns.Add("State");
-        dataTable.Columns.Add("PostalCode");
-
-        // Add the person data to the DataTable
-        foreach (var person in persons)
+        await using var transaction = await connection.BeginTransactionAsync();
+        
+        foreach (var batch in PartitionList(persons, batchSize))
         {
-            dataTable.Rows.Add(
-                person.Id.ToString(),
-                person.FirstName,
-                person.LastName,
-                person.Street,
-                person.City,
-                person.State,
-                person.PostalCode
-            );
+            // Create a DataTable to hold the data
+            var dataTable = new DataTable();
+            dataTable.Columns.Add("Id");
+            dataTable.Columns.Add("FirstName");
+            dataTable.Columns.Add("LastName");
+            dataTable.Columns.Add("Street");
+            dataTable.Columns.Add("City");
+            dataTable.Columns.Add("State");
+            dataTable.Columns.Add("PostalCode");
+
+            // Add the person data to the DataTable
+            foreach (var person in batch)
+            {
+                dataTable.Rows.Add(
+                    person.Id,
+                    person.FirstName,
+                    person.LastName,
+                    person.Street,
+                    person.City,
+                    person.State,
+                    person.PostalCode
+                );
+            }
+
+            // Perform the bulk insert
+            var bulkCopy = new MySqlBulkCopy(connection, transaction)
+            {
+                DestinationTableName = "person"
+            };
+
+            await bulkCopy.WriteToServerAsync(dataTable);
         }
 
-        // Perform the bulk insert
-        var bulkCopy = new MySqlBulkCopy(connection)
+        await transaction.CommitAsync();
+    }
+    
+    public static IEnumerable<IEnumerable<T>> PartitionList<T>(IEnumerable<T> values, int partitionSize = 30)
+    {
+        var arr = values.ToArray();
+        var i = 0;
+        while (i < arr.Length)
         {
-            DestinationTableName = "person"
-        };
-
-        await bulkCopy.WriteToServerAsync(dataTable);
+            yield return arr.Skip(i).Take(partitionSize);
+            i += partitionSize;
+        }
     }
 }
